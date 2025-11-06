@@ -1,0 +1,15 @@
+{
+  "timestamp": "20251106_103135",
+  "ensemble_scheme": "Best-heavy",
+  "ensemble_weights": [
+    0.6,
+    0.25,
+    0.15
+  ],
+  "xgb_cv_acc": 0.8672478124171166,
+  "lgb_cv_acc": 0.8664329893547051,
+  "cat_cv_acc": 0.8630726872307874,
+  "ensemble_oof_acc": 0.8666282824405633,
+  "ensemble_oof_roc": 0.9191495901037623,
+  "ensemble_oof_f1": 0.9139744079781782
+}

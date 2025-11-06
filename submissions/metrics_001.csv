@@ -1,0 +1,2 @@
+submission_num,model_type,use_smote,iterative_training,roc_auc,f1,precision,recall,accuracy,train_samples,validation_samples,submission_samples
+1,RandomForest,False,False,0.9121349315178113,0.9195174369061081,0.9356186196666958,0.9039610533303828,0.8735932120640746,475195,118799,254569
