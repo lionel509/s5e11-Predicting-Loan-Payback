@@ -211,8 +211,9 @@ __marimo__/
 # ========================================
 
 # Large preprocessed data files (npy, npz)
-Data/preprocessed/*.npy
-Data/preprocessed/*.npz
+
+Data/preprocessed/
+Data/preprocessed/**/*.npy
 
 # Large processed data files
 Data/processed/**/*.npz
