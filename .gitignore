@@ -205,3 +205,23 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# ========================================
+# Project-specific: Large files that exceed GitHub's 100MB limit
+# ========================================
+
+# Large preprocessed data files (npy, npz)
+Data/preprocessed/*.npy
+Data/preprocessed/*.npz
+
+# Large processed data files
+Data/processed/**/*.npz
+
+# Large model files (joblib, pkl)
+models/**/pipeline.joblib
+models/**/*.pkl
+models/**/*.joblib
+models/rf_v1__*/
+
+# CatBoost training artifacts
+catboost_info/
