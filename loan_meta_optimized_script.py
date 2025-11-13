@@ -4,6 +4,7 @@ from typing import List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
+import joblib
 
 from sklearn.model_selection import StratifiedKFold, train_test_split, KFold
 from sklearn.metrics import roc_auc_score, f1_score, precision_recall_curve, roc_curve, confusion_matrix
@@ -14,6 +15,7 @@ from sklearn.pipeline import Pipeline
 from sklearn.isotonic import IsotonicRegression
 from sklearn.linear_model import LogisticRegression
 from scipy import stats
+from sklearn.neural_network import MLPClassifier
 
 # Optional display for notebooks; fallback to print
 try:
@@ -71,6 +73,29 @@ SUB_DIR.mkdir(exist_ok=True, parents=True)
 
 print(f'ROOT: {ROOT}')
 print(f'Files exist? train={TRAIN_PATH.exists()} test={TEST_PATH.exists()} sample={SAMPLE_SUB_PATH.exists()}')
+
+# -------------------------
+# USER CONFIG / QUICK TUNES
+# Put your preferred seeds, flags, and quick-run switches here.
+# This is the single place to edit when experimenting locally.
+# -------------------------
+# Example: SEEDS = [42, 43, 44]
+DEFAULT_SEEDS = [42, 43, 44, 45, 46, 99]
+# If >0, append this many sequential seeds after DEFAULT_SEEDS (useful to expand ensemble quickly)
+DEFAULT_MORE_SEEDS = 10
+
+# Training options
+DEFAULT_USE_NEURAL = True   # enable MLP blending at L2
+DEFAULT_N_SPLITS = 5         # CV folds
+DEFAULT_SAMPLE_N = 0         # if >0, sample this many rows for fast smoke runs
+DEFAULT_SAVE_MODELS = False  # save refit base models
+DEFAULT_USE_ENABLE_CATEGORICAL = True  # try XGBoost categorical support when available
+
+# Monitoring / baseline
+LAST_REPORTED_SCORE = 0.92057  # last run score you reported
+
+print(f"CONFIG: seeds={DEFAULT_SEEDS} more_seeds={DEFAULT_MORE_SEEDS} use_neural={DEFAULT_USE_NEURAL} n_splits={DEFAULT_N_SPLITS} sample_n={DEFAULT_SAMPLE_N}")
+print(f"Last reported score: {LAST_REPORTED_SCORE:.5f} — aim to beat this (notebook was higher)")
 
 # Config & target/id detection
 TARGET_CANDIDATES = ['target','TARGET','label','Label','default','is_default','loan_status','loan_repaid']
@@ -317,6 +342,14 @@ cat_cols = [c for c in X.columns if c not in num_cols]
 print(f'Engineered: {len(num_cols)} numeric, {len(cat_cols)} categorical')
 print(f'Feature count: {X.shape[1]}')
 
+# Convert any remaining object-typed columns to pandas 'category' so LightGBM accepts them.
+# XGBoost will receive integer-encoded copies later (we keep mappings), but LGB/CB can use pandas categorical dtypes.
+for c in list(X.columns):
+    if X[c].dtype == 'O':
+        X[c] = X[c].astype('category')
+        if X_test is not None and c in X_test.columns:
+            X_test[c] = X_test[c].astype('category')
+
 # Simplified preprocessing (prepared but unused in current flow)
 numeric_tf = Pipeline(steps=[('imputer', SimpleImputer(strategy='median'))])
 categorical_tf = Pipeline(steps=[
@@ -391,28 +424,76 @@ def train_base_models(X, y, X_test=None, seed=42, n_splits=5):
 
     for j, (name, params) in enumerate(base_models_config):
         fold_idx = 0
+        # Precompute label mappings for non-numeric categorical columns so XGBoost can be given numeric data
+        # Use columns that are not numeric (includes 'category' dtype we set earlier) to build mappings
+        from pandas.api import types as _pd_types
+        cat_obj_cols = [c for c in X.columns if not _pd_types.is_numeric_dtype(X[c])]
+        cat_mappings = {}
+        for c in cat_obj_cols:
+            # Use training-wide unique values; unknowns map to 0
+            uniques = [v for v in pd.Series(X[c].astype(str).fillna('__nan__')).unique()]
+            cat_mappings[c] = {v: i + 1 for i, v in enumerate(uniques)}
         for tr_idx, va_idx in cv.split(X, y):
             X_tr, X_va = X.iloc[tr_idx], X.iloc[va_idx]
             y_tr, y_va = y.iloc[tr_idx], y.iloc[va_idx]
 
             if name == 'xgb':
+                # XGBoost currently requires numeric (or category + enable_categorical).
+                # Keep original DataFrames untouched for LGB/CB; create numeric copies for XGB only.
+                X_tr_enc = X_tr.copy()
+                X_va_enc = X_va.copy()
+                X_test_enc = None
+                for c, mapping in cat_mappings.items():
+                    if c in X_tr_enc.columns:
+                        X_tr_enc[c] = X_tr_enc[c].astype(str).map(mapping).fillna(0).astype(int)
+                    if c in X_va_enc.columns:
+                        X_va_enc[c] = X_va_enc[c].astype(str).map(mapping).fillna(0).astype(int)
+                if X_test is not None:
+                    X_test_enc = X_test.copy()
+                    for c, mapping in cat_mappings.items():
+                        if c in X_test_enc.columns:
+                            X_test_enc[c] = X_test_enc[c].astype(str).map(mapping).fillna(0).astype(int)
+
                 model = xgb.XGBClassifier(random_state=seed+fold_idx, **params)
-                model.fit(X_tr, y_tr)
-                p = np.asarray(model.predict_proba(X_va))[:, 1]
+                model.fit(X_tr_enc, y_tr)
+                p = np.asarray(model.predict_proba(X_va_enc))[:, 1]
             elif name == 'lgb':
-                cat_features = [c for c in X.columns if X[c].dtype == 'object' or '_bin' in c]
+                # LightGBM accepts pandas 'category' dtype; pass those columns as categorical features
+                from pandas.api import types as _pd_types2
+                cat_features = [c for c in X.columns if (not _pd_types2.is_numeric_dtype(X[c])) or '_bin' in c]
                 model = lgb.LGBMClassifier(random_state=seed+fold_idx, **params)
                 model.fit(X_tr, y_tr, categorical_feature=cat_features if cat_features else 'auto')
                 p = np.asarray(model.predict_proba(X_va))[:, 1]
             elif name == 'cb':
-                cat_features = [c for c in X.columns if X[c].dtype == 'object' or '_bin' in c]
+                from pandas.api import types as _pd_types3
+                cat_features = [c for c in X.columns if (not _pd_types3.is_numeric_dtype(X[c])) or '_bin' in c]
+                # CatBoost requires categorical feature values to be integer or string (no floats).
+                # Create copies where categorical columns are converted to string (and NaNs handled) to avoid
+                # _catboost.CatBoostError: Invalid type for cat_feature ...: cat_features must be integer or string
+                X_tr_cb = X_tr.copy()
+                X_va_cb = X_va.copy()
+                X_test_cb = None
+                for c in cat_features:
+                    if c in X_tr_cb.columns:
+                        X_tr_cb[c] = X_tr_cb[c].astype(str).fillna('__nan__')
+                    if c in X_va_cb.columns:
+                        X_va_cb[c] = X_va_cb[c].astype(str).fillna('__nan__')
+                    if X_test is not None and c in X_test.columns:
+                        if X_test_cb is None:
+                            X_test_cb = X_test.copy()
+                        X_test_cb[c] = X_test_cb[c].astype(str).fillna('__nan__')
+
                 model = cb.CatBoostClassifier(
                     random_seed=seed+fold_idx,
-                    cat_features=cat_features if cat_features else None,
                     **params
                 )
-                model.fit(X_tr, y_tr)
-                p = np.asarray(model.predict_proba(X_va))[:, 1]
+                # pass cat_features names in fit to ensure CatBoost sees the converted string values
+                if cat_features:
+                    model.fit(X_tr_cb, y_tr, cat_features=cat_features)
+                    p = np.asarray(model.predict_proba(X_va_cb))[:, 1]
+                else:
+                    model.fit(X_tr_cb, y_tr)
+                    p = np.asarray(model.predict_proba(X_va_cb))[:, 1]
             else:
                 raise ValueError('Unknown model name')
 
@@ -421,7 +502,13 @@ def train_base_models(X, y, X_test=None, seed=42, n_splits=5):
             aucs[name].append(auc)
 
             if X_test is not None and test_preds is not None:
-                test_preds[:, j] += np.asarray(model.predict_proba(X_test))[:, 1] / cv.get_n_splits()
+                # Use encoded test set for XGB, original for others
+                if name == 'xgb' and X_test_enc is not None:
+                    test_preds[:, j] += np.asarray(model.predict_proba(X_test_enc))[:, 1] / cv.get_n_splits()
+                elif name == 'cb' and 'X_test_cb' in locals() and X_test_cb is not None:
+                    test_preds[:, j] += np.asarray(model.predict_proba(X_test_cb))[:, 1] / cv.get_n_splits()
+                else:
+                    test_preds[:, j] += np.asarray(model.predict_proba(X_test))[:, 1] / cv.get_n_splits()
             fold_idx += 1
 
         mean_auc = np.mean(aucs[name])
@@ -431,7 +518,7 @@ def train_base_models(X, y, X_test=None, seed=42, n_splits=5):
 
 # L2 / L3
 
-def train_meta_l2(oof_feats, y, test_feats=None, seed=42):
+def train_meta_l2(oof_feats, y, test_feats=None, seed=42, use_neural=False):
     cv = get_cv(n_splits=5, seed=seed)
     oof_meta = np.zeros(len(y))
     test_meta = np.zeros(len(test_feats)) if test_feats is not None else None
@@ -492,13 +579,35 @@ def train_meta_l2(oof_feats, y, test_feats=None, seed=42):
         else:
             clf = LogisticRegression(max_iter=10000, C=0.1, penalty='l2')
             clf.fit(X_tr, y_tr)
-
         p = np.asarray(clf.predict_proba(X_va))[:, 1]
+
+        # Optional neural meta: train a small MLP on the same L2 features and average probabilities.
+        p_neural = None
+        if use_neural:
+            try:
+                mlp = MLPClassifier(hidden_layer_sizes=(128, 64), activation='relu', solver='adam',
+                                     random_state=seed+fold, max_iter=500)
+                mlp.fit(X_tr, y_tr)
+                p_neural = np.asarray(mlp.predict_proba(X_va))[:, 1]
+            except Exception:
+                p_neural = None
+
+        if p_neural is not None:
+            # Average the meta-model and neural meta
+            p = 0.5 * p + 0.5 * p_neural
         oof_meta[va_idx] = p
         fold_aucs.append(roc_auc_score(y_va, p))
 
         if expanded_test is not None and test_meta is not None:
             test_meta += np.asarray(clf.predict_proba(expanded_test))[:, 1] / cv.get_n_splits()
+            if use_neural and p_neural is not None:
+                try:
+                        # We avoid double-counting; the neural meta was averaged into `p` above for OOF.
+                        # For test predictions, average by adding (mlp_pred)/n_splits * 0.5 to match OOF averaging.
+                        test_meta += 0.5 * np.asarray(mlp.predict_proba(expanded_test))[:, 1] / cv.get_n_splits()
+                except Exception:
+                    # If neural couldn't predict on expanded_test shape, skip adding
+                    pass
 
     meta_auc = roc_auc_score(y, oof_meta)
     print(f'  ✓ L2 Meta AUC: {meta_auc:.5f} | folds: {np.round(fold_aucs, 5)}')
@@ -540,21 +649,34 @@ def train_meta_l3_with_pseudo(oof_l2, y, test_l2, X, X_test, seed=42):
 
 # Training orchestrator
 
-def run_training_extreme(seeds: List[int] = [42, 43], target_auc: float = 0.93):
+def run_training_extreme(seeds: List[int] = [42, 43], target_auc: float = 0.93,
+                         use_neural: bool = False, n_splits: int = 5, sample_n: int = 0,
+                         save_models: bool = False, use_enable_categorical: bool = False):
     results = []
     best = None
 
     for i, seed in enumerate(seeds):
         print(f"\n{'='*70}\n🚀 SEED {seed} ({i+1}/{len(seeds)}) — Targeting 93%+ AUC\n{'='*70}")
 
+        # Optionally sample the dataset for quick smoke runs
+        X_work, y_work, X_test_work = X, y, X_test
+        if sample_n and sample_n > 0 and sample_n < len(X):
+            rs = np.random.RandomState(seed)
+            idx = rs.choice(len(X), size=sample_n, replace=False)
+            X_work = X.iloc[idx].reset_index(drop=True)
+            y_work = y.iloc[idx].reset_index(drop=True)
+            if X_test is not None:
+                # keep full test for predictions (not strictly necessary to sample test)
+                X_test_work = X_test.copy()
+
         print('\n[L1] Training base models...')
-        oof_l1, test_l1, base_aucs = train_base_models(X, y, X_test, seed=seed, n_splits=5)
+        oof_l1, test_l1, base_aucs = train_base_models(X_work, y_work, X_test_work, seed=seed, n_splits=n_splits)
 
         print('\n[L2] Training meta model...')
-        oof_l2, test_l2 = train_meta_l2(oof_l1, y, test_l1, seed=seed)
+        oof_l2, test_l2 = train_meta_l2(oof_l1, y_work, test_l1, seed=seed, use_neural=use_neural)
 
         print('\n[L3] Pseudo-labeling...')
-        oof_l3 = train_meta_l3_with_pseudo(oof_l2, y, test_l2, X, X_test, seed=seed)
+        oof_l3 = train_meta_l3_with_pseudo(oof_l2, y_work, test_l2, X_work, X_test_work, seed=seed)
 
         print('\n[CAL] Calibrating predictions...')
         iso = fit_isotonic(y.values, oof_l3)
@@ -629,8 +751,14 @@ def build_submission(best):
 def parse_args(argv: Optional[List[str]] = None):
     import argparse
     parser = argparse.ArgumentParser(description='Extreme stacking trainer for loan default prediction')
-    parser.add_argument('--seeds', type=str, default='42,43', help='Comma-separated list of integer seeds')
+    parser.add_argument('--seeds', type=str, default=','.join([str(s) for s in DEFAULT_SEEDS]), help='Comma-separated list of integer seeds')
     parser.add_argument('--target-auc', type=float, default=0.93, help='Target AUC to stop early')
+    parser.add_argument('--use-neural', action='store_true', default=DEFAULT_USE_NEURAL, help='Enable neural meta (MLP) blending at L2')
+    parser.add_argument('--n-splits', type=int, default=DEFAULT_N_SPLITS, help='Number of CV splits for base models and meta')
+    parser.add_argument('--sample-n', type=int, default=DEFAULT_SAMPLE_N, help='If >0, sample this many training rows for a quick smoke run')
+    parser.add_argument('--save-models', action='store_true', default=DEFAULT_SAVE_MODELS, help='Save refit base models on full data into models/ (joblib)')
+    parser.add_argument('--more-seeds', type=int, default=DEFAULT_MORE_SEEDS, help='Append this many consecutive seeds after the provided seeds')
+    parser.add_argument('--use-enable-categorical', action='store_true', default=DEFAULT_USE_ENABLE_CATEGORICAL, help='Attempt to use XGBoost categorical support when available')
     args = parser.parse_args(argv)
 
     try:
@@ -639,7 +767,14 @@ def parse_args(argv: Optional[List[str]] = None):
             seeds = [42]
     except Exception:
         seeds = [42]
-    return seeds, args.target_auc
+
+    # Append more sequential seeds if requested
+    if args.more_seeds and args.more_seeds > 0:
+        last = seeds[-1]
+        extra = [last + i + 1 for i in range(args.more_seeds)]
+        seeds = seeds + extra
+
+    return seeds, args.target_auc, args.use_neural, args.n_splits, args.sample_n, args.save_models, args.use_enable_categorical
 
 
 def main(argv: Optional[List[str]] = None):
@@ -647,8 +782,10 @@ def main(argv: Optional[List[str]] = None):
     print('📈 Strategy: L1→L2→L3 stacking + pseudo-labeling + calibration')
     print('⏱️  ETA: ~10-15 minutes with full optimization\n')
 
-    seeds, target_auc = parse_args(argv)
-    results_df, best = run_training_extreme(seeds=seeds, target_auc=target_auc)
+    seeds, target_auc, use_neural, n_splits, sample_n, save_models, use_enable_categorical = parse_args(argv)
+    results_df, best = run_training_extreme(seeds=seeds, target_auc=target_auc, use_neural=use_neural,
+                                           n_splits=n_splits, sample_n=sample_n, save_models=save_models,
+                                           use_enable_categorical=use_enable_categorical)
 
     print('\n' + '='*70)
     print('📊 RESULTS SUMMARY')
