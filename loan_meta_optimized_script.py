@@ -80,19 +80,20 @@ print(f'Files exist? train={TRAIN_PATH.exists()} test={TEST_PATH.exists()} sampl
 # This is the single place to edit when experimenting locally.
 # -------------------------
 # Example: SEEDS = [42, 43, 44]
-DEFAULT_SEEDS = [42, 43, 44, 45, 46, 99, 123, 456]  # Increased from 6 to 8 seeds
+# ULTRA AGGRESSIVE: More seeds for maximum ensemble diversity
+DEFAULT_SEEDS = [42, 43, 44, 45, 46, 99, 123, 456, 789, 888, 999, 1337]  # 12 seeds for max diversity
 # If >0, append this many sequential seeds after DEFAULT_SEEDS (useful to expand ensemble quickly)
-DEFAULT_MORE_SEEDS = 10
+DEFAULT_MORE_SEEDS = 15  # Increased from 10 to 15
 
 # Training options
 DEFAULT_USE_NEURAL = True   # enable MLP blending at L2
-DEFAULT_N_SPLITS = 5         # CV folds
+DEFAULT_N_SPLITS = 7         # Increased from 5 to 7 for better generalization
 DEFAULT_SAMPLE_N = 0         # if >0, sample this many rows for fast smoke runs
 DEFAULT_SAVE_MODELS = False  # save refit base models
 DEFAULT_USE_ENABLE_CATEGORICAL = True  # try XGBoost categorical support when available
 
 # Monitoring / baseline
-LAST_REPORTED_SCORE = 0.92057  # last run score you reported
+LAST_REPORTED_SCORE = 0.92849  # MUST BEAT THIS - current target
 
 print(f"CONFIG: seeds={DEFAULT_SEEDS} more_seeds={DEFAULT_MORE_SEEDS} use_neural={DEFAULT_USE_NEURAL} n_splits={DEFAULT_N_SPLITS} sample_n={DEFAULT_SAMPLE_N}")
 print(f"Last reported score: {LAST_REPORTED_SCORE:.5f} — aim to beat this (notebook was higher)")
@@ -402,29 +403,29 @@ def train_base_models(X, y, X_test=None, seed=42, n_splits=5):
 
     base_models_config = []
     if XGB_AVAILABLE:
-        # More aggressive: more iterations, slower learning, deeper trees
+        # ULTRA AGGRESSIVE: Even more iterations, slower learning, deeper trees
         base_models_config.append(('xgb', {
-            'n_estimators': 1500, 'learning_rate': 0.01, 'max_depth': 8,
-            'subsample': 0.75, 'colsample_bytree': 0.75,
-            'reg_lambda': 3.0, 'reg_alpha': 0.8, 'min_child_weight': 3,
+            'n_estimators': 2500, 'learning_rate': 0.005, 'max_depth': 9,
+            'subsample': 0.8, 'colsample_bytree': 0.8,
+            'reg_lambda': 2.5, 'reg_alpha': 0.6, 'min_child_weight': 2,
             'tree_method': 'hist', 'n_jobs': -1,
-            'early_stopping_rounds': 150  # Added early stopping
+            'early_stopping_rounds': 200  # More patience
         }))
     if LGB_AVAILABLE:
-        # More aggressive: doubled iterations, slower learning, deeper model
+        # ULTRA AGGRESSIVE: More iterations, slower learning, deeper model
         base_models_config.append(('lgb', {
-            'n_estimators': 2000, 'learning_rate': 0.008, 'max_depth': 10, 'num_leaves': 255,
-            'subsample': 0.7, 'colsample_bytree': 0.7,
-            'reg_lambda': 3.0, 'reg_alpha': 0.6, 'min_child_samples': 20,
+            'n_estimators': 3000, 'learning_rate': 0.005, 'max_depth': 12, 'num_leaves': 511,
+            'subsample': 0.75, 'colsample_bytree': 0.75,
+            'reg_lambda': 2.5, 'reg_alpha': 0.5, 'min_child_samples': 15,
             'verbose': -1, 'n_jobs': -1, 'force_col_wise': True
         }))
     if CB_AVAILABLE:
-        # More aggressive: doubled iterations, slower learning, deeper model
+        # ULTRA AGGRESSIVE: More iterations, slower learning, deeper model
         base_models_config.append(('cb', {
-            'iterations': 2000, 'learning_rate': 0.008, 'depth': 9,
-            'l2_leaf_reg': 5, 'border_count': 254, 'min_data_in_leaf': 10,
+            'iterations': 3000, 'learning_rate': 0.005, 'depth': 10,
+            'l2_leaf_reg': 4, 'border_count': 254, 'min_data_in_leaf': 8,
             'verbose': 0, 'thread_count': -1,
-            'early_stopping_rounds': 150  # Added early stopping
+            'early_stopping_rounds': 200  # More patience
         }))
 
     if not base_models_config:
@@ -585,22 +586,22 @@ def train_meta_l2(oof_feats, y, test_feats=None, seed=42, use_neural=False):
         y_tr, y_va = y.iloc[tr_idx], y.iloc[va_idx]
 
         if XGB_AVAILABLE:
-            # More aggressive L2 meta: more iterations, slower learning
+            # ULTRA AGGRESSIVE L2 meta: maximum iterations, very slow learning
             clf = xgb.XGBClassifier(
-                max_depth=7, n_estimators=2000, learning_rate=0.008,
-                subsample=0.75, colsample_bytree=0.75,
-                reg_lambda=4.0, reg_alpha=1.0, min_child_weight=5,
+                max_depth=8, n_estimators=3000, learning_rate=0.005,
+                subsample=0.8, colsample_bytree=0.8,
+                reg_lambda=3.5, reg_alpha=0.8, min_child_weight=4,
                 objective='binary:logistic', eval_metric='auc',
                 random_state=seed+fold, tree_method='hist',
-                early_stopping_rounds=150, n_jobs=-1
+                early_stopping_rounds=200, n_jobs=-1
             )
             clf.fit(X_tr, y_tr, eval_set=[(X_va, y_va)], verbose=False)
         elif LGB_AVAILABLE:
-            # More aggressive L2 meta: more iterations, slower learning
+            # ULTRA AGGRESSIVE L2 meta: maximum iterations, very slow learning
             clf = lgb.LGBMClassifier(
-                n_estimators=2000, learning_rate=0.008, max_depth=8, num_leaves=127,
-                subsample=0.75, colsample_bytree=0.75,
-                reg_lambda=4.0, reg_alpha=1.0, min_child_samples=30,
+                n_estimators=3000, learning_rate=0.005, max_depth=9, num_leaves=255,
+                subsample=0.8, colsample_bytree=0.8,
+                reg_lambda=3.5, reg_alpha=0.8, min_child_samples=25,
                 random_state=seed+fold, verbose=-1, n_jobs=-1,
             )
             clf.fit(X_tr, y_tr, eval_set=[(X_va, y_va)])
@@ -609,18 +610,18 @@ def train_meta_l2(oof_feats, y, test_feats=None, seed=42, use_neural=False):
             clf.fit(X_tr, y_tr)
         p = np.asarray(clf.predict_proba(X_va))[:, 1]
 
-        # Optional neural meta: train a more aggressive MLP on the same L2 features and average probabilities.
+        # Optional neural meta: train an ULTRA AGGRESSIVE MLP on the same L2 features and average probabilities.
         p_neural = None
         if use_neural:
             try:
-                # More aggressive: deeper network, more iterations, adaptive learning
+                # ULTRA AGGRESSIVE: even deeper network, more iterations, lower learning rate
                 mlp = MLPClassifier(
-                    hidden_layer_sizes=(256, 128, 64), activation='relu', 
-                    solver='adam', alpha=0.001,
-                    learning_rate='adaptive', learning_rate_init=0.001,
-                    random_state=seed+fold, max_iter=1000, 
-                    early_stopping=True, validation_fraction=0.1,
-                    n_iter_no_change=50
+                    hidden_layer_sizes=(512, 256, 128, 64), activation='relu', 
+                    solver='adam', alpha=0.0005,
+                    learning_rate='adaptive', learning_rate_init=0.0005,
+                    random_state=seed+fold, max_iter=2000, 
+                    early_stopping=True, validation_fraction=0.15,
+                    n_iter_no_change=75
                 )
                 mlp.fit(X_tr, y_tr)
                 p_neural = np.asarray(mlp.predict_proba(X_va))[:, 1]
@@ -684,14 +685,14 @@ def train_meta_l3_with_pseudo(oof_l2, y, test_l2, X, X_test, seed=42):
 
 # Training orchestrator
 
-def run_training_extreme(seeds: List[int] = [42, 43], target_auc: float = 0.93,
+def run_training_extreme(seeds: List[int] = [42, 43], target_auc: float = 0.9285,
                          use_neural: bool = False, n_splits: int = 5, sample_n: int = 0,
                          save_models: bool = False, use_enable_categorical: bool = False):
     results = []
     best = None
 
     for i, seed in enumerate(seeds):
-        print(f"\n{'='*70}\n🚀 SEED {seed} ({i+1}/{len(seeds)}) — Targeting 93%+ AUC\n{'='*70}")
+        print(f"\n{'='*70}\n🚀 SEED {seed} ({i+1}/{len(seeds)}) — ULTRA AGGRESSIVE - Target: {target_auc:.5f}\n{'='*70}")
 
         # Optionally sample the dataset for quick smoke runs
         X_work, y_work, X_test_work = X, y, X_test
@@ -767,7 +768,7 @@ def build_submission(best):
             sub[sub_target_col] = preds
             timestamp = time.strftime('%Y%m%d_%H%M%S')
             auc_str = f"{best['auc_cal']:.5f}".replace('.', '')
-            out_path = SUB_DIR / f'EXTREME_93pct_AUC{auc_str}_{timestamp}.csv'
+            out_path = SUB_DIR / f'ULTRA_AGGRESSIVE_AUC{auc_str}_{timestamp}.csv'
             sub.to_csv(out_path, index=False)
 
             print(f'\n🏆 SUBMISSION SAVED!')
@@ -776,8 +777,8 @@ def build_submission(best):
             print(f'   Threshold: {best["best_thr"]["threshold"]:.3f}')
             print(f'   Samples: {len(sub):,}')
 
-            if best['auc_cal'] >= 0.93:
-                print(f'\n🎊 FIRST TO BREAK 93%! Submit this ASAP! 🎊')
+            if best['auc_cal'] >= 0.92849:
+                print(f'\n🎊 TARGET BEATEN! {best["auc_cal"]:.5f} > 0.92849! Submit this! 🎊')
         else:
             print('⚠️  No test predictions available.')
     else:
@@ -788,7 +789,7 @@ def parse_args(argv: Optional[List[str]] = None):
     import argparse
     parser = argparse.ArgumentParser(description='Extreme stacking trainer for loan default prediction')
     parser.add_argument('--seeds', type=str, default=','.join([str(s) for s in DEFAULT_SEEDS]), help='Comma-separated list of integer seeds')
-    parser.add_argument('--target-auc', type=float, default=0.93, help='Target AUC to stop early')
+    parser.add_argument('--target-auc', type=float, default=0.9285, help='Target AUC to stop early (must beat 0.92849)')
     parser.add_argument('--use-neural', action='store_true', default=DEFAULT_USE_NEURAL, help='Enable neural meta (MLP) blending at L2')
     parser.add_argument('--n-splits', type=int, default=DEFAULT_N_SPLITS, help='Number of CV splits for base models and meta')
     parser.add_argument('--sample-n', type=int, default=DEFAULT_SAMPLE_N, help='If >0, sample this many training rows for a quick smoke run')
@@ -814,9 +815,9 @@ def parse_args(argv: Optional[List[str]] = None):
 
 
 def main(argv: Optional[List[str]] = None):
-    print('🎯 TARGET: Break 93% AUC barrier')
-    print('📈 Strategy: L1→L2→L3 stacking + pseudo-labeling + calibration')
-    print('⏱️  ETA: ~10-15 minutes with full optimization\n')
+    print('🎯 TARGET: MUST BEAT 0.92849 AUC (92.85%)')
+    print('📈 Strategy: ULTRA AGGRESSIVE L1→L2→L3 stacking + pseudo-labeling + calibration')
+    print('⏱️  ETA: ~25-40 minutes with ultra aggressive optimization\n')
 
     seeds, target_auc, use_neural, n_splits, sample_n, save_models, use_enable_categorical = parse_args(argv)
     results_df, best = run_training_extreme(seeds=seeds, target_auc=target_auc, use_neural=use_neural,
@@ -840,12 +841,12 @@ def main(argv: Optional[List[str]] = None):
         print(f'   Threshold: {best["best_thr"]["threshold"]:.3f}')
         print(f'   F1 Score: {best["best_thr"]["f1"]:.4f}')
 
-        if best['auc_cal'] >= 0.93:
-            print(f'\n🎉🎉🎉 BREAKTHROUGH ACHIEVED! {best["auc_cal"]:.5f} >= 93% 🎉🎉🎉')
+        if best['auc_cal'] >= 0.92849:
+            print(f'\n🎉🎉🎉 TARGET ACHIEVED! {best["auc_cal"]:.5f} >= 0.92849 🎉🎉🎉')
         else:
-            gap = 0.93 - best['auc_cal']
-            print(f'\n📍 Gap to 93%: {gap:.5f} ({gap*100:.3f} pp)')
-            print('💡 Next steps: Add more seeds, try neural blend, or ensemble with other models')
+            gap = 0.92849 - best['auc_cal']
+            print(f'\n📍 Gap to 0.92849: {gap:.5f} ({gap*100:.3f} pp)')
+            print('💡 Next steps: Add even more seeds or try different hyperparameters')
 
         build_submission(best)
     else:
